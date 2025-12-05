@@ -23,6 +23,7 @@ import sqlite3
 import datetime
 import traceback
 import logging
+import sys
 from typing import List, Optional
 
 import discord
@@ -64,15 +65,14 @@ PERSONAS = {
     "tieu_thu_dong": {
         "name": "Tiểu Thư Đồng",
         "system": (
-            "Bạn là 'Tiểu Thư Đồng', NPC hướng dẫn game Where Winds Meet (Yến Vân Thập Lục Thanh).
-"
-            "QUY TẮC:
-"
-            "1. Xưng hô: Tại hạ / Đại hiệp.
-"
-            "2. Giọng điệu: Cổ trang, kiếm hiệp, ngắn gọn, súc tích.
-"
-            "3. Kiến thức game: Trong game Where Winds Meet, người chơi KHÔNG thể tặng quà cho NPC. Nếu được hỏi về việc tặng quà, hãy khẳng định là không có tính năng này."
+            """
+Bạn là 'Tiểu Thư Đồng', NPC hướng dẫn game Where Winds Meet (Yến Vân Thập Lục Thanh).
+
+QUY TẮC:
+1. Xưng hô: Tại hạ / Đại hiệp.
+2. Giọng điệu: Cổ trang, kiếm hiệp, ngắn gọn, súc tích.
+3. Kiến thức game: Trong game Where Winds Meet, người chơi KHÔNG thể tặng quà cho NPC. Nếu được hỏi về việc tặng quà, hãy khẳng định là không có tính năng này.
+            """
         )
     }
 }
@@ -218,9 +218,7 @@ async def gemini_send(user_message: str, system_message: str, images: Optional[L
     system_part = system_message or ""
     user_part = user_message or ""
     # Keep prompt compact to save tokens
-    full_prompt_text = f"HƯỚNG DẪN HỆ THỐNG: {system_part}
-
-NGƯỜI DÙNG: {user_part}"
+    full_prompt_text = f"HƯỚNG DẪN HỆ THỐNG: {system_part}\n\nNGƯỜI DÙNG: {user_part}"
 
     # Convert images to bytes if present
     image_blobs = []
@@ -229,7 +227,7 @@ NGƯỜI DÙNG: {user_part}"
             try:
                 image_blobs.append(await image_to_bytes(img))
             except Exception:
-                continue
+                pass
 
     last_exception = None
 
@@ -355,7 +353,7 @@ async def on_message(message):
                     img = PIL.Image.open(io.BytesIO(img_bytes)).convert("RGB")
                     image_list.append(img)
                 except Exception:
-                    continue
+                    pass
 
     if not user_text and not image_list:
         return
@@ -421,4 +419,17 @@ if __name__ == "__main__":
 
     if not DISCORD_TOKEN:
         logger.warning("WARNING: Missing DISCORD_TOKEN")
-    bot.run(DISCORD_TOKEN)
+
+    # Start the bot in a way that works both in normal scripts and in environments
+    # where an asyncio event loop is already running (e.g. Jupyter).
+    try:
+        bot.run(DISCORD_TOKEN)
+    except RuntimeError as e:
+        # Handle "asyncio.run() cannot be called from a running event loop"
+        if "asyncio.run() cannot be called from a running event loop" in str(e):
+            logger.info("Event loop already running - starting bot using create_task on current loop.")
+            loop = asyncio.get_event_loop()
+            # Schedule bot.start as a task on the existing loop
+            loop.create_task(bot.start(DISCORD_TOKEN))
+        else:
+            raise
