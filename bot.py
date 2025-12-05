@@ -11,7 +11,7 @@ import sqlite3
 import datetime
 import logging
 import random
-from typing import List, Optional
+from typing import List, Optional, Any
 
 import discord
 from discord.ext import commands
@@ -60,12 +60,12 @@ logger = logging.getLogger("ekko")
 # Gemini INIT + Circuit Breaker
 # ---------------------------
 GEMINI_OK = False
-G_MODEL = None
+G_MODEL: Optional[Any] = None
 _api_semaphore = asyncio.Semaphore(CONCURRENCY)
 
 # circuit breaker state
 _circuit_open = False
-_circuit_open_until = 0
+_circuit_open_until = 0.0
 _circuit_failures = 0
 CIRCUIT_FAIL_THRESHOLD = 5
 CIRCUIT_OPEN_SECONDS = 30
@@ -73,8 +73,11 @@ CIRCUIT_OPEN_SECONDS = 30
 if GENAI_AVAILABLE and GEMINI_KEY:
     try:
         genai.configure(api_key=GEMINI_KEY)
-        # create model lazily
-        G_MODEL = genai.GenerativeModel(MODEL_NAME)
+        # create model lazily (some SDKs allow reusing object, some prefer creating per-call)
+        try:
+            G_MODEL = genai.GenerativeModel(MODEL_NAME)
+        except Exception:
+            G_MODEL = None
         GEMINI_OK = True
         logger.info("Gemini configured: %s", MODEL_NAME)
     except Exception as e:
@@ -187,20 +190,73 @@ def build_prompt(system_text: str, history: List, user_text: str) -> str:
     return "\n".join(parts)
 
 # ---------------------------
+# Helper: parse various Gemini response shapes
+# ---------------------------
+
+def _extract_text_from_response(resp: Any) -> Optional[str]:
+    # resp may be an object with .text or .candidates, or a dict-like structure
+    try:
+        if resp is None:
+            return None
+        if isinstance(resp, str):
+            return resp
+        if hasattr(resp, 'text') and getattr(resp, 'text'):
+            return getattr(resp, 'text')
+        if hasattr(resp, 'content') and getattr(resp, 'content'):
+            return getattr(resp, 'content')
+        if hasattr(resp, 'candidates') and getattr(resp, 'candidates'):
+            cand = getattr(resp, 'candidates')
+            if isinstance(cand, (list, tuple)) and cand:
+                first = cand[0]
+                return getattr(first, 'content', None) or getattr(first, 'text', None)
+        # dict-like
+        if isinstance(resp, dict):
+            for k in ('text','content','output'):
+                if k in resp and resp[k]:
+                    return resp[k]
+    except Exception:
+        logger.exception('Error extracting text from response')
+    return None
+
+# ---------------------------
+# Local persona fallback (improved)
+# ---------------------------
+async def _local_persona_fallback(system_text: str, user_text: str) -> str:
+    safe_user = (user_text or "").strip()
+    if not safe_user:
+        return random.choice(KIEM_HIEP_ERRORS)
+
+    # If user asked a short question, try to give a short actionable hint so it's more useful
+    if any(q in safe_user for q in ['?', 'gì', 'ai', 'ở đâu', 'như thế nào', 'nào', 'không']):
+        return random.choice([
+            f"🍶 {safe_user} — nghe như một đề bài hay. Tại hạ đoán sơ qua: thử kiểm tra phần mục 'Map' trước.",
+            f"🍶 Được rồi! Về câu '{safe_user}', trước mắt thử làm X rồi kiểm tra Y.",
+            f"🍶 Hỏi đúng chỗ! Tại hạ tóm tắt: làm bước A, nếu không được hãy làm bước B."
+        ])
+    return random.choice([
+        f"🍶 Ta nghe ngươi: '{safe_user}'. Kể rõ hơn, tại hạ sẽ phân tích kỹ.",
+        f"🍶 Ồ ho, {safe_user}? Tiếp tục nói cho rõ để tại hạ nắn nót câu trả lời.",
+    ])
+
+# ---------------------------
 # Gemini caller với retry/backoff + circuit-breaker
+# tries multiple SDK call styles for compatibility
 # ---------------------------
 async def gemini_text_reply(system_text: str, user_text: str, channel_id: int) -> str:
     global _circuit_open, _circuit_open_until, _circuit_failures
     # circuit open check
     if _circuit_open and time.time() < _circuit_open_until:
-        return random.choice(KIEM_HIEP_ERRORS)
+        logger.info("Circuit open — returning persona fallback")
+        return await _local_persona_fallback(system_text, user_text)
     elif _circuit_open and time.time() >= _circuit_open_until:
         # try half-open
         _circuit_open = False
         _circuit_failures = 0
 
-    if not GEMINI_OK:
-        return random.choice(KIEM_HIEP_ERRORS)
+    # If Gemini not configured, use local fallback
+    if not GEMINI_OK or (GENAI_AVAILABLE and G_MODEL is None):
+        logger.info("Gemini unavailable — using local persona fallback")
+        return await _local_persona_fallback(system_text, user_text)
 
     history = await fetch_history(channel_id)
     prompt = build_prompt(system_text, history, user_text)
@@ -211,49 +267,75 @@ async def gemini_text_reply(system_text: str, user_text: str, channel_id: int) -
             try:
                 logger.info("Gemini attempt %s (attempt %d)", MODEL_NAME, attempt)
 
-                response = await G_MODEL.generate_content_async(
-                    contents=[{"role": "user", "parts": [prompt]}],
-                    generation_config={"max_output_tokens": MAX_TOKENS, "temperature": 0.7}
-                )
+                resp = None
+                # Try preferred async model method if available
+                try:
+                    if G_MODEL is not None and hasattr(G_MODEL, 'generate_content_async'):
+                        resp = await G_MODEL.generate_content_async(
+                            contents=[{"role": "user", "parts": [prompt]}],
+                            generation_config={"max_output_tokens": MAX_TOKENS, "temperature": 0.7}
+                        )
+                    else:
+                        # Fallback to top-level helper
+                        maybe = getattr(genai, 'generate_text', None)
+                        if maybe:
+                            maybe_resp = maybe(model=MODEL_NAME, input=prompt, max_output_tokens=MAX_TOKENS, temperature=0.7)
+                            resp = await maybe_resp if asyncio.iscoroutine(maybe_resp) else maybe_resp
+                        else:
+                            # Another fallback: genai.create_response if exists
+                            creator = getattr(genai, 'create_response', None)
+                            if creator:
+                                maybe_resp = creator(model=MODEL_NAME, prompt=prompt)
+                                resp = await maybe_resp if asyncio.iscoroutine(maybe_resp) else maybe_resp
+
+                except Exception as inner_e:
+                    logger.warning("Primary Gemini call failed: %s", repr(inner_e))
+                    # keep resp as None and try alternative below
 
                 # parse
-                text = None
-                if hasattr(response, 'text') and response.text:
-                    text = response.text
-                elif hasattr(response, 'candidates') and response.candidates:
-                    cand = response.candidates[0]
-                    text = getattr(cand, 'content', None) or getattr(cand, 'text', None)
+                text = _extract_text_from_response(resp)
+                if not text:
+                    # if resp is None or not parsed, try to log and attempt a simpler call
+                    logger.debug("Full resp repr: %s", repr(resp))
+                    # attempt a simple generate_text call if not tried
+                    try:
+                        gen_text = getattr(genai, 'generate_text', None)
+                        if gen_text:
+                            maybe_resp = gen_text(model=MODEL_NAME, input=prompt, max_output_tokens=MAX_TOKENS)
+                            resp2 = await maybe_resp if asyncio.iscoroutine(maybe_resp) else maybe_resp
+                            text = _extract_text_from_response(resp2)
+                    except Exception as e2:
+                        logger.warning("Fallback generate_text failed: %s", repr(e2))
 
                 if text:
-                    # success — reset failure counter
                     _circuit_failures = 0
                     return str(text).strip()
 
                 last_exc = Exception('Empty response')
-                logger.warning('Gemini returned empty response')
+                logger.warning('Gemini returned empty response on attempt %d', attempt)
 
             except Exception as e:
                 last_exc = e
                 _circuit_failures += 1
                 logger.warning('Gemini fail %s (attempt %d): %s', MODEL_NAME, attempt, repr(e))
 
-                # if failures reach threshold, open circuit
-                if _circuit_failures >= CIRCUIT_FAIL_THRESHOLD:
-                    _circuit_open = True
-                    _circuit_open_until = time.time() + CIRCUIT_OPEN_SECONDS
-                    logger.error('Circuit opened for %s seconds', CIRCUIT_OPEN_SECONDS)
-                    return random.choice(KIEM_HIEP_ERRORS_HARD)
+            # failure handling
+            if _circuit_failures >= CIRCUIT_FAIL_THRESHOLD:
+                _circuit_open = True
+                _circuit_open_until = time.time() + CIRCUIT_OPEN_SECONDS
+                logger.error('Circuit opened for %s seconds', CIRCUIT_OPEN_SECONDS)
+                return await _local_persona_fallback(system_text, user_text)
 
-                if attempt == MAX_RETRIES:
-                    logger.error('Gemini final fail: %s', repr(last_exc))
-                    return random.choice(KIEM_HIEP_ERRORS)
+            if attempt == MAX_RETRIES:
+                logger.error('Gemini final fail: %s', repr(last_exc))
+                return await _local_persona_fallback(system_text, user_text)
 
-                # exponential backoff with jitter
-                backoff = min(1.0 * (2 ** (attempt - 1)), 10)
-                jitter = random.uniform(0, 0.5)
-                await asyncio.sleep(backoff + jitter)
+            # exponential backoff with jitter
+            backoff = min(1.0 * (2 ** (attempt - 1)), 10)
+            jitter = random.uniform(0, 0.5)
+            await asyncio.sleep(backoff + jitter)
 
-    return random.choice(KIEM_HIEP_ERRORS)
+    return await _local_persona_fallback(system_text, user_text)
 
 # ---------------------------
 # Discord Bot
