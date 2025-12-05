@@ -10,7 +10,11 @@ from keep_alive import keep_alive
 # ==========================================
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-TARGET_CHANNEL = "chat-voi-gemini"
+
+# TÊN KÊNH: Bạn đã đổi thành "hoi-dap"
+# Lưu ý: Trong Discord tên kênh phải viết thường, không dấu cách.
+# Nếu kênh của bạn có dấu (ví dụ "hỏi-đáp"), bạn phải sửa dòng dưới này y hệt thế.
+TARGET_CHANNEL = "hoi-dap"
 
 system_instruction_text = """
 Bạn là "Tiểu Thư Đồng", NPC hướng dẫn game "Where Winds Meet".
@@ -22,7 +26,6 @@ QUY TẮC:
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Dùng Flash để phản hồi nhanh nhất có thể
 model = genai.GenerativeModel(
     model_name='gemini-1.5-flash', 
     system_instruction=system_instruction_text
@@ -37,12 +40,15 @@ client = discord.Client(intents=intents)
 @client.event
 async def on_ready():
     print(f'{client.user} đã xuất sơn!')
-    await client.change_presence(activity=discord.Game(name=f"Đàm đạo tại #{TARGET_CHANNEL}"))
+    # CẬP NHẬT TRẠNG THÁI MỚI TẠI ĐÂY
+    await client.change_presence(activity=discord.Game(name="đang chuẩn bị tái xuất giang hồ"))
 
 @client.event
 async def on_message(message):
     if message.author == client.user: return
-    if str(message.channel) != TARGET_CHANNEL: return
+    
+    # Kiểm tra đúng kênh hoi-dap mới được trả lời
+    if str(message.channel.name) != TARGET_CHANNEL: return
 
     # --- LỆNH XOÁ ---
     if message.content.lower().startswith("!xoa"):
@@ -51,7 +57,7 @@ async def on_message(message):
             parts = message.content.split()
             if len(parts) > 1 and parts[1].isdigit(): amount = int(parts[1]) + 1
             await message.channel.purge(limit=amount)
-        except: pass # Lặng lẽ bỏ qua nếu lỗi để không spam
+        except: pass
         return
 
     # --- LỆNH RESET ---
@@ -68,11 +74,8 @@ async def on_message(message):
         await message.channel.send(embed=embed)
         return
 
-    # ==========================================
-    # XỬ LÝ AI - CHỈ GỬI 1 TIN NHẮN DUY NHẤT
-    # ==========================================
+    # --- XỬ LÝ AI ---
     try:
-        # Hiện dòng chữ "Bot is typing..." ở góc dưới (không gửi tin nhắn chờ nữa)
         async with message.channel.typing():
             user_id = message.author.id
             content_to_send = []
@@ -88,25 +91,18 @@ async def on_message(message):
                 user_chats[user_id] = model.start_chat(history=[])
 
             chat_session = user_chats[user_id]
-
-            # 1. Lấy toàn bộ câu trả lời (chờ 1 chút để gom đủ chữ)
             response = chat_session.send_message(content_to_send)
             
-            # 2. Gửi bụp 1 phát (Chỉ 1 tin nhắn)
             if response.text:
-                # Nếu dài quá 2000 ký tự thì Discord bắt buộc phải chia, cái này không tránh được
                 if len(response.text) > 2000:
-                    # Cắt đôi
                     k = 1900
                     for i in range(0, len(response.text), k):
                         await message.channel.send(response.text[i:i+k])
                 else:
-                    # Bình thường gửi 1 câu
                     await message.channel.send(response.text)
 
     except Exception as e:
         print(f"Lỗi: {e}")
-        # Nếu lỗi thì im lặng hoặc báo nhẹ 1 câu
         await message.channel.send("⚠️ *Thiên cơ bất khả lộ (Lỗi kết nối).*")
 
 if __name__ == "__main__":
