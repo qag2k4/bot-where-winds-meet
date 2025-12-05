@@ -1,4 +1,0 @@
-discord.py
-google-generativeai
-flask
-Pillow
