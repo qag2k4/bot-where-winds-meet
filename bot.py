@@ -9,11 +9,22 @@ import traceback
 import discord
 from discord.ext import commands
 from discord import app_commands
+from dotenv import load_dotenv
+
+# ---------------------------
+# Load .env (nếu chạy local)
+# ---------------------------
+load_dotenv()
 
 # ---------------------------
 # keep_alive (Render ping)
 # ---------------------------
-from keep_alive import keep_alive
+try:
+    from keep_alive import keep_alive
+except ImportError:
+    # Fallback nếu chưa tạo file keep_alive.py
+    def keep_alive():
+        print("Keep alive function not found.")
 
 # Optional: Gemini SDK
 try:
@@ -29,19 +40,21 @@ import PIL.Image
 # ---------------------------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", None)
-TARGET_CHANNELS = ["hoi-dap"]
+TARGET_CHANNELS = ["hoi-dap"]  # Tên kênh bot được phép chat
 
 COOLDOWN_SECONDS = 2
-
 DB_PATH = "ekko_bot.sqlite"
 
+# Cấu hình Persona (Nhân vật)
 PERSONAS = {
     "tieu_thu_dong": {
         "name": "Tiểu Thư Đồng",
         "system": (
-            "Bạn là 'Tiểu Thư Đồng', NPC hướng dẫn game Where Winds Meet.\n"
-            "QUY TẮC:\n1. Xưng hô: Tại hạ / Đại hiệp.\n2. Giọng điệu: Cổ trang, kiếm hiệp, ngắn gọn.\n"
-            "3. Tuyệt đối KHÔNG hướng dẫn tặng quà NPC."
+            "Bạn là 'Tiểu Thư Đồng', NPC hướng dẫn game Where Winds Meet (Yến Vân Thập Lục Thanh).\n"
+            "QUY TẮC:\n"
+            "1. Xưng hô: Tại hạ / Đại hiệp.\n"
+            "2. Giọng điệu: Cổ trang, kiếm hiệp, ngắn gọn, súc tích.\n"
+            "3. Kiến thức game: Trong game Where Winds Meet, người chơi KHÔNG thể tặng quà cho NPC. Nếu được hỏi về việc tặng quà, hãy khẳng định là không có tính năng này."
         )
     }
 }
@@ -49,16 +62,12 @@ PERSONAS = {
 DEFAULT_PERSONA = "tieu_thu_dong"
 
 # ---------------------------
-# Setup Gemini – API mới (0.4.0+)
+# Setup Gemini
 # ---------------------------
 ai_enabled = False
 if GEMINI_AVAILABLE and GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-
-        # Không được dùng system_instruction trong GenerativeModel()
-        model = genai.GenerativeModel("gemini-1.5-flash")
-
         ai_enabled = True
         print("✅ Gemini configured.")
     except Exception as e:
@@ -79,13 +88,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 # ---------------------------
-# Cooldown + persona memory
+# Memory Variables
 # ---------------------------
 _user_last_call = {}
 _user_persona = {}
 
 # ---------------------------
-# Database
+# Database Functions
 # ---------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -135,28 +144,31 @@ async def save_chat(user_id, channel_id, role, persona, content):
     )
 
 # ---------------------------
-# Gemini send – API mới
+# Gemini Logic (Đã sửa đổi)
 # ---------------------------
-async def gemini_send(chat_session, user_message, system_message, images=None):
+async def gemini_send(user_message, system_message, images=None):
     """
-    API mới: phải gửi đúng format list messages.
-    images: list PIL.Image
+    Hàm gọi Gemini API.
+    Khởi tạo model bên trong hàm để áp dụng system_instruction động.
     """
+    # Khởi tạo model với System Instruction (Persona) hiện tại
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        system_instruction=system_message
+    )
 
-    contents = [
-        {"role": "system", "content": system_message},
-    ]
+    contents = []
 
-    # User text
+    # Thêm Text của User
     if user_message:
-        contents.append({"role": "user", "content": user_message})
-
-    # User images
+        contents.append(user_message)
+    
+    # Thêm Ảnh của User (nếu có)
     if images:
         for img in images:
-            contents.append({"role": "user", "content": img})
+            contents.append(img)
 
-    # Gọi API blocking → chuyển vào executor
+    # Gọi API (chạy trong executor để không chặn bot)
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         None,
@@ -229,6 +241,7 @@ async def on_ready():
 async def on_message(message):
     if message.author == bot.user:
         return
+    # Chỉ hoạt động trong kênh chỉ định
     if str(message.channel.name) not in TARGET_CHANNELS:
         return
 
@@ -249,6 +262,7 @@ async def on_message(message):
         await message.channel.send("🍶 Đã quên chuyện cũ.")
         return
 
+    # Check Cooldown
     on_cd, remain = is_on_cooldown(message.author.id)
     if on_cd:
         await message.reply(f"⏳ Chờ {int(remain)+1}s rồi nói tiếp.")
@@ -261,37 +275,37 @@ async def on_message(message):
     if message.attachments:
         for att in message.attachments:
             if att.content_type and att.content_type.startswith("image/"):
-                img_bytes = await att.read()
                 try:
+                    img_bytes = await att.read()
                     img = PIL.Image.open(io.BytesIO(img_bytes))
                     image_list.append(img)
-                except:
+                except Exception:
                     pass
 
     if not user_text and not image_list:
         return
 
-    persona = _user_persona.get(message.author.id, DEFAULT_PERSONA)
-    system_message = PERSONAS[persona]["system"]
+    # Xác định Persona
+    persona_key = _user_persona.get(message.author.id, DEFAULT_PERSONA)
+    system_message = PERSONAS[persona_key]["system"]
 
-    await save_chat(message.author.id, message.channel.id, "user", persona, user_text)
+    # Lưu chat user vào DB
+    await save_chat(message.author.id, message.channel.id, "user", persona_key, user_text)
 
     async with message.channel.typing():
         try:
             if ai_enabled:
                 result = await gemini_send(
-                    chat_session=None,
                     user_message=user_text,
                     system_message=system_message,
                     images=image_list
                 )
 
                 reply_text = result.text if hasattr(result, "text") else "..."
-
             else:
-                reply_text = f"Tại hạ nhận được: {user_text or '[hình ảnh]'}\n(Thêm GEMINI_API_KEY để trả lời sâu hơn.)"
+                reply_text = f"Tại hạ nhận được: {user_text or '[hình ảnh]'}\n(Chưa cấu hình GEMINI_API_KEY)"
 
-            # Gửi tin dài
+            # Gửi tin nhắn (chia nhỏ nếu quá dài)
             if len(reply_text) > 2000:
                 for i in range(0, len(reply_text), 1900):
                     sent = await message.channel.send(reply_text[i:i+1900])
@@ -300,14 +314,15 @@ async def on_message(message):
                 sent = await message.channel.send(reply_text)
                 await sent.add_reaction("🗑️")
 
-            await save_chat(message.author.id, message.channel.id, "bot", persona, reply_text)
+            # Lưu chat bot vào DB
+            await save_chat(message.author.id, message.channel.id, "bot", persona_key, reply_text)
 
         except Exception as e:
             traceback.print_exc()
-            await message.channel.send("⚠️ Sự cố xử lý.")
+            await message.channel.send("⚠️ Có lỗi xảy ra khi gọi AI.")
 
 # ---------------------------
-# Reaction delete
+# Reaction delete (Xóa tin nhắn bot)
 # ---------------------------
 @bot.event
 async def on_reaction_add(reaction, user):
@@ -322,28 +337,31 @@ async def on_reaction_add(reaction, user):
         if str(reaction.emoji) != "🗑️":
             return
 
+        # Nếu user có quyền quản lý tin nhắn
         perm = msg.channel.permissions_for(user)
         if perm.manage_messages:
             await msg.delete()
             return
 
+        # Nếu user là người vừa chat gần đây (kiểm tra DB)
         rows = await db_fetchall(
-            "SELECT user_id FROM chats WHERE channel_id = ? ORDER BY id DESC LIMIT 50",
+            "SELECT user_id FROM chats WHERE channel_id = ? ORDER BY id DESC LIMIT 5",
             (msg.channel.id,)
         )
-        recent = [r[0] for r in rows]
-        if user.id in recent:
+        recent_users = [r[0] for r in rows]
+        if user.id in recent_users:
             await msg.delete()
             return
+
     except Exception:
         traceback.print_exc()
 
 # ---------------------------
-# START BOT + KEEP ALIVE
+# START BOT
 # ---------------------------
 if __name__ == "__main__":
     keep_alive()
     if not DISCORD_TOKEN:
-        print("ERROR: DISCORD_TOKEN missing")
-        raise SystemExit(1)
-    bot.run(DISCORD_TOKEN)
+        print("ERROR: DISCORD_TOKEN missing in Environment Variables")
+    else:
+        bot.run(DISCORD_TOKEN)
