@@ -17,7 +17,7 @@ TARGET_CHANNEL = "hỏi-đáp"
 
 # CÀI ĐẶT NHÂN CÁCH (PHONG CÁCH KIẾM HIỆP)
 system_instruction_text = """
-Bạn là "Tiểu Thư Đồng", một thư sinh am hiểu giang hồ trong game "Where Winds Meet" (Yến Vân Thập Lục Thanh).
+Bạn là "Ruby", một thư sinh am hiểu giang hồ trong game "Where Winds Meet" (Yến Vân Thập Lục Thanh).
 
 QUY TẮC ỨNG XỬ (BẮT BUỘC):
 1. Xưng hô: Luôn xưng là "tại hạ" hoặc "tiểu sinh", gọi người dùng là "đại hiệp" hoặc "các hạ".
@@ -149,3 +149,4 @@ async def on_message(message):
 if __name__ == "__main__":
     keep_alive()
     client.run(DISCORD_TOKEN)
+
