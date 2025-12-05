@@ -1,18 +1,21 @@
 from flask import Flask
 from threading import Thread
-import os
+import logging
 
-app = Flask(__name__)
+# Tắt bớt log của Flask để đỡ rối mắt console
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
-@app.route("/")
+app = Flask('')
+
+@app.route('/')
 def home():
-    return "Bot is running!"
+    return "I'm alive!"
 
 def run():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    # Chạy server ở port 8080
+    app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
     t = Thread(target=run)
-    t.daemon = True
     t.start()
