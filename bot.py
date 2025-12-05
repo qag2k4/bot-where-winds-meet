@@ -12,7 +12,7 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 # ---------------------------
-# Load .env (nếu chạy local)
+# Load .env (Để chạy local hoặc load biến môi trường an toàn)
 # ---------------------------
 load_dotenv()
 
@@ -22,7 +22,6 @@ load_dotenv()
 try:
     from keep_alive import keep_alive
 except ImportError:
-    # Fallback nếu chưa tạo file keep_alive.py
     def keep_alive():
         print("Keep alive function not found.")
 
@@ -40,12 +39,12 @@ import PIL.Image
 # ---------------------------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", None)
-TARGET_CHANNELS = ["hoi-dap"]  # Tên kênh bot được phép chat
+TARGET_CHANNELS = ["hoi-dap"]
 
 COOLDOWN_SECONDS = 2
 DB_PATH = "ekko_bot.sqlite"
 
-# Cấu hình Persona (Nhân vật)
+# Cấu hình Persona
 PERSONAS = {
     "tieu_thu_dong": {
         "name": "Tiểu Thư Đồng",
@@ -144,41 +143,50 @@ async def save_chat(user_id, channel_id, role, persona, content):
     )
 
 # ---------------------------
-# Gemini Logic (Đã sửa fix lỗi 404)
+# Gemini Logic (Đã sửa chữa)
 # ---------------------------
 async def gemini_send(user_message, system_message, images=None):
     """
-    Hàm gọi Gemini API.
-    Đã sửa model_name thành 'gemini-1.5-flash-001' để tránh lỗi 404.
+    Sử dụng model 'gemini-pro' cho Text (ổn định nhất) và 'gemini-1.5-flash' cho Ảnh.
+    Ghép system_message trực tiếp vào prompt để tránh lỗi API.
     """
+    
+    # 1. Chuẩn bị nội dung gửi (Prompt ghép)
+    full_prompt = []
+    
+    # Ghép tính cách vào trước câu hỏi
+    if user_message:
+        combined_text = f"[HƯỚNG DẪN ẨN]: {system_message}\n\n[NGƯỜI DÙNG HỎI]: {user_message}"
+        full_prompt.append(combined_text)
+    
+    # Thêm ảnh nếu có
+    if images:
+        for img in images:
+            full_prompt.append(img)
+            
+    # 2. Chọn Model phù hợp
+    # Nếu có ảnh -> Bắt buộc dùng Flash (Pro text không xem được ảnh)
+    # Nếu chỉ có chữ -> Dùng Pro (để tránh lỗi 404 của Flash)
+    if images:
+        target_model_name = "gemini-1.5-flash"
+    else:
+        target_model_name = "gemini-pro"
+    
+    # 3. Gọi API
     try:
-        # Khởi tạo model với System Instruction (Persona) hiện tại
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-001",  # <-- ĐÃ SỬA TÊN MODEL Ở ĐÂY
-            system_instruction=system_message
-        )
-
-        contents = []
-
-        # Thêm Text của User
-        if user_message:
-            contents.append(user_message)
-        
-        # Thêm Ảnh của User (nếu có)
-        if images:
-            for img in images:
-                contents.append(img)
-
-        # Gọi API (chạy trong executor để không chặn bot)
+        model = genai.GenerativeModel(target_model_name)
         loop = asyncio.get_event_loop()
+        
+        # Gọi hàm generate_content
         return await loop.run_in_executor(
-            None,
-            lambda: model.generate_content(contents)
+            None, 
+            lambda: model.generate_content(full_prompt)
         )
+
     except Exception as e:
-        # Nếu model flash-001 lỗi, thử fallback về gemini-pro (bản cũ nhưng ổn định)
-        print(f"Lỗi gọi model flash-001: {e}")
-        raise e
+        print(f"Lỗi gọi model {target_model_name}: {e}")
+        # Nếu model chính lỗi, trả về object giả để bot không crash
+        return type('obj', (object,), {'text': f"⚠️ Hệ thống AI ({target_model_name}) đang bận hoặc lỗi. Vui lòng thử lại sau."})
 
 # ---------------------------
 # Cooldown check
@@ -196,36 +204,24 @@ def is_on_cooldown(user_id):
 # ---------------------------
 @tree.command(name="help", description="Hướng dẫn dùng bot Ekko")
 async def slash_help(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📜 Tàng Kinh Các",
-        description="Hướng dẫn sử dụng bot",
-        color=0xA62019
-    )
-    embed.add_field(name="Hoạt động tại", value=", ".join(TARGET_CHANNELS), inline=False)
-    embed.add_field(name="Lệnh", value="`/help`\n`/reset`\n`/set-persona`", inline=False)
+    embed = discord.Embed(title="📜 Tàng Kinh Các", description="Hướng dẫn sử dụng bot", color=0xA62019)
+    embed.add_field(name="Kênh hoạt động", value=", ".join(TARGET_CHANNELS), inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @tree.command(name="reset", description="Reset lịch sử chat")
 async def slash_reset(interaction: discord.Interaction):
-    await db_execute(
-        "DELETE FROM chats WHERE user_id = ? AND channel_id = ?",
-        (interaction.user.id, interaction.channel.id)
-    )
+    await db_execute("DELETE FROM chats WHERE user_id = ? AND channel_id = ?", (interaction.user.id, interaction.channel.id))
     _user_persona.pop(interaction.user.id, None)
-    await interaction.response.send_message("🍶 Đã quên hết chuyện cũ.", ephemeral=True)
+    await interaction.response.send_message("🍶 Đã quên chuyện cũ.", ephemeral=True)
 
 @tree.command(name="set-persona", description="Đổi persona")
 @app_commands.describe(persona_key="Nhập key (VD: tieu_thu_dong)")
 async def slash_set_persona(interaction: discord.Interaction, persona_key: str):
     if persona_key not in PERSONAS:
-        await interaction.response.send_message(
-            f"Persona `{persona_key}` không tồn tại.\nCó: {', '.join(PERSONAS.keys())}",
-            ephemeral=True
-        )
+        await interaction.response.send_message(f"Không có persona này.", ephemeral=True)
         return
-
     _user_persona[interaction.user.id] = persona_key
-    await interaction.response.send_message(f"Đã đổi persona → `{persona_key}`", ephemeral=True)
+    await interaction.response.send_message(f"Đã đổi sang: `{persona_key}`", ephemeral=True)
 
 # ---------------------------
 # Ready event
@@ -235,6 +231,18 @@ async def on_ready():
     try:
         await tree.sync()
         print("Slash commands synced.")
+        
+        # --- DEBUG: In danh sách model có sẵn ---
+        if ai_enabled:
+            print("\n--- Available Models ---")
+            try:
+                for m in genai.list_models():
+                    if 'generateContent' in m.supported_generation_methods:
+                        print(f"- {m.name}")
+            except Exception:
+                pass
+            print("------------------------\n")
+            
     except Exception as e:
         print("Sync error:", repr(e))
     print(f"Logged in as {bot.user}")
@@ -244,39 +252,25 @@ async def on_ready():
 # ---------------------------
 @bot.event
 async def on_message(message):
-    if message.author == bot.user:
-        return
-    # Chỉ hoạt động trong kênh chỉ định
-    if str(message.channel.name) not in TARGET_CHANNELS:
-        return
+    if message.author == bot.user: return
+    if str(message.channel.name) not in TARGET_CHANNELS: return
 
     await bot.process_commands(message)
-
     lower = message.content.lower().strip()
 
-    if lower.startswith("!help"):
-        await message.channel.send("Dùng `/help` để xem hướng dẫn.")
-        return
-
     if lower.startswith("!reset"):
-        await db_execute(
-            "DELETE FROM chats WHERE user_id = ? AND channel_id = ?",
-            (message.author.id, message.channel.id)
-        )
+        await db_execute("DELETE FROM chats WHERE user_id = ? AND channel_id = ?", (message.author.id, message.channel.id))
         _user_persona.pop(message.author.id, None)
         await message.channel.send("🍶 Đã quên chuyện cũ.")
         return
 
-    # Check Cooldown
     on_cd, remain = is_on_cooldown(message.author.id)
     if on_cd:
-        await message.reply(f"⏳ Chờ {int(remain)+1}s rồi nói tiếp.")
+        await message.reply(f"⏳ Chờ {int(remain)+1}s.")
         return
 
-    # Gom text + ảnh
     user_text = message.content if message.content else ""
     image_list = []
-
     if message.attachments:
         for att in message.attachments:
             if att.content_type and att.content_type.startswith("image/"):
@@ -284,33 +278,24 @@ async def on_message(message):
                     img_bytes = await att.read()
                     img = PIL.Image.open(io.BytesIO(img_bytes))
                     image_list.append(img)
-                except Exception:
-                    pass
+                except: pass
 
-    if not user_text and not image_list:
-        return
+    if not user_text and not image_list: return
 
-    # Xác định Persona
     persona_key = _user_persona.get(message.author.id, DEFAULT_PERSONA)
-    system_message = PERSONAS[persona_key]["system"]
+    system_msg = PERSONAS[persona_key]["system"]
 
-    # Lưu chat user vào DB
     await save_chat(message.author.id, message.channel.id, "user", persona_key, user_text)
 
     async with message.channel.typing():
         try:
             if ai_enabled:
-                result = await gemini_send(
-                    user_message=user_text,
-                    system_message=system_message,
-                    images=image_list
-                )
-
-                reply_text = result.text if hasattr(result, "text") else "..."
+                result = await gemini_send(user_text, system_msg, image_list)
+                reply_text = result.text if hasattr(result, "text") else str(result)
             else:
-                reply_text = f"Tại hạ nhận được: {user_text or '[hình ảnh]'}\n(Chưa cấu hình GEMINI_API_KEY)"
+                reply_text = "Chưa cấu hình API Key."
 
-            # Gửi tin nhắn (chia nhỏ nếu quá dài)
+            # Xử lý tin nhắn dài
             if len(reply_text) > 2000:
                 for i in range(0, len(reply_text), 1900):
                     sent = await message.channel.send(reply_text[i:i+1900])
@@ -318,48 +303,29 @@ async def on_message(message):
             else:
                 sent = await message.channel.send(reply_text)
                 await sent.add_reaction("🗑️")
-
-            # Lưu chat bot vào DB
+            
             await save_chat(message.author.id, message.channel.id, "bot", persona_key, reply_text)
-
         except Exception as e:
             traceback.print_exc()
-            await message.channel.send(f"⚠️ Có lỗi xảy ra khi gọi AI: {str(e)}")
+            await message.channel.send("⚠️ Lỗi xử lý.")
 
 # ---------------------------
-# Reaction delete (Xóa tin nhắn bot)
+# Reaction delete
 # ---------------------------
 @bot.event
 async def on_reaction_add(reaction, user):
-    try:
-        if user.bot:
-            return
+    if user.bot: return
+    msg = reaction.message
+    if msg.author != bot.user or str(reaction.emoji) != "🗑️": return
+    
+    perm = msg.channel.permissions_for(user)
+    if perm.manage_messages:
+        await msg.delete()
+        return
 
-        msg = reaction.message
-        if msg.author != bot.user:
-            return
-
-        if str(reaction.emoji) != "🗑️":
-            return
-
-        # Nếu user có quyền quản lý tin nhắn
-        perm = msg.channel.permissions_for(user)
-        if perm.manage_messages:
-            await msg.delete()
-            return
-
-        # Nếu user là người vừa chat gần đây (kiểm tra DB)
-        rows = await db_fetchall(
-            "SELECT user_id FROM chats WHERE channel_id = ? ORDER BY id DESC LIMIT 5",
-            (msg.channel.id,)
-        )
-        recent_users = [r[0] for r in rows]
-        if user.id in recent_users:
-            await msg.delete()
-            return
-
-    except Exception:
-        traceback.print_exc()
+    rows = await db_fetchall("SELECT user_id FROM chats WHERE channel_id = ? ORDER BY id DESC LIMIT 5", (msg.channel.id,))
+    if user.id in [r[0] for r in rows]:
+        await msg.delete()
 
 # ---------------------------
 # START BOT
@@ -367,6 +333,5 @@ async def on_reaction_add(reaction, user):
 if __name__ == "__main__":
     keep_alive()
     if not DISCORD_TOKEN:
-        print("ERROR: DISCORD_TOKEN missing in Environment Variables")
-    else:
-        bot.run(DISCORD_TOKEN)
+        print("WARNING: DISCORD_TOKEN is missing!")
+    bot.run(DISCORD_TOKEN)
