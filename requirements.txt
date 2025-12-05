@@ -1,4 +1,4 @@
-discord.py
-google-generativeai
-flask
-Pillow
+discord.py==2.3.2
+google-generativeai==0.4.0
+flask==3.0.3
+Pillow==10.3.0
