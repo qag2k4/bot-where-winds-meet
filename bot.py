@@ -1,4 +1,3 @@
-# bot.py
 import os
 import io
 import time
@@ -32,7 +31,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", None)
 TARGET_CHANNELS = ["hoi-dap"]
 
-COOLDOWN_SECONDS = 2   # Cooldown = 2 giây
+COOLDOWN_SECONDS = 2
 
 DB_PATH = "ekko_bot.sqlite"
 
@@ -50,16 +49,16 @@ PERSONAS = {
 DEFAULT_PERSONA = "tieu_thu_dong"
 
 # ---------------------------
-# Setup Gemini
+# Setup Gemini – API mới (0.4.0+)
 # ---------------------------
 ai_enabled = False
 if GEMINI_AVAILABLE and GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction=PERSONAS[DEFAULT_PERSONA]["system"]
-        )
+
+        # Không được dùng system_instruction trong GenerativeModel()
+        model = genai.GenerativeModel("gemini-1.5-flash")
+
         ai_enabled = True
         print("✅ Gemini configured.")
     except Exception as e:
@@ -67,6 +66,7 @@ if GEMINI_AVAILABLE and GEMINI_API_KEY:
         ai_enabled = False
 else:
     print("ℹ️ Gemini disabled (no key).")
+
 
 # ---------------------------
 # Discord setup
@@ -135,11 +135,33 @@ async def save_chat(user_id, channel_id, role, persona, content):
     )
 
 # ---------------------------
-# Gemini send
+# Gemini send – API mới
 # ---------------------------
-async def gemini_send(chat_session, content):
+async def gemini_send(chat_session, user_message, system_message, images=None):
+    """
+    API mới: phải gửi đúng format list messages.
+    images: list PIL.Image
+    """
+
+    contents = [
+        {"role": "system", "content": system_message},
+    ]
+
+    # User text
+    if user_message:
+        contents.append({"role": "user", "content": user_message})
+
+    # User images
+    if images:
+        for img in images:
+            contents.append({"role": "user", "content": img})
+
+    # Gọi API blocking → chuyển vào executor
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, chat_session.send_message, content)
+    return await loop.run_in_executor(
+        None,
+        lambda: model.generate_content(contents)
+    )
 
 # ---------------------------
 # Cooldown check
@@ -232,9 +254,9 @@ async def on_message(message):
         await message.reply(f"⏳ Chờ {int(remain)+1}s rồi nói tiếp.")
         return
 
-    content_to_send = []
-    if message.content:
-        content_to_send.append(message.content)
+    # Gom text + ảnh
+    user_text = message.content if message.content else ""
+    image_list = []
 
     if message.attachments:
         for att in message.attachments:
@@ -242,34 +264,34 @@ async def on_message(message):
                 img_bytes = await att.read()
                 try:
                     img = PIL.Image.open(io.BytesIO(img_bytes))
-                    content_to_send.append(img)
+                    image_list.append(img)
                 except:
                     pass
 
-    if not content_to_send:
+    if not user_text and not image_list:
         return
 
     persona = _user_persona.get(message.author.id, DEFAULT_PERSONA)
+    system_message = PERSONAS[persona]["system"]
 
-    chat_session = None
-    if ai_enabled:
-        if not hasattr(bot, "ai_sessions"):
-            bot.ai_sessions = {}
-        if message.author.id not in bot.ai_sessions:
-            bot.ai_sessions[message.author.id] = model.start_chat(history=[])
-        chat_session = bot.ai_sessions[message.author.id]
-
-    await save_chat(message.author.id, message.channel.id, "user", persona, message.content)
+    await save_chat(message.author.id, message.channel.id, "user", persona, user_text)
 
     async with message.channel.typing():
         try:
             if ai_enabled:
-                response = await gemini_send(chat_session, content_to_send)
-                reply_text = response.text if hasattr(response, "text") else "..."
-            else:
-                text_summary = content_to_send[0] if isinstance(content_to_send[0], str) else "[hình ảnh]"
-                reply_text = f"Tại hạ nhận được: {text_summary}\n(Thêm GEMINI_API_KEY để trả lời sâu hơn.)"
+                result = await gemini_send(
+                    chat_session=None,
+                    user_message=user_text,
+                    system_message=system_message,
+                    images=image_list
+                )
 
+                reply_text = result.text if hasattr(result, "text") else "..."
+
+            else:
+                reply_text = f"Tại hạ nhận được: {user_text or '[hình ảnh]'}\n(Thêm GEMINI_API_KEY để trả lời sâu hơn.)"
+
+            # Gửi tin dài
             if len(reply_text) > 2000:
                 for i in range(0, len(reply_text), 1900):
                     sent = await message.channel.send(reply_text[i:i+1900])
@@ -280,7 +302,7 @@ async def on_message(message):
 
             await save_chat(message.author.id, message.channel.id, "bot", persona, reply_text)
 
-        except Exception:
+        except Exception as e:
             traceback.print_exc()
             await message.channel.send("⚠️ Sự cố xử lý.")
 
