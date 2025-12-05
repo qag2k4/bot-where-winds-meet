@@ -3,3 +3,4 @@ google-generativeai==0.4.0
 flask==3.0.3
 Pillow>=11.0.0
 gunicorn
+python-dotenv
