@@ -11,28 +11,30 @@ from keep_alive import keep_alive
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-# System Instruction
+# TÊN KÊNH DUY NHẤT MÀ BOT ĐƯỢC PHÉP TRẢ LỜI
+# Bạn bắt buộc phải tạo kênh tên y hệt thế này trong Discord
+TARGET_CHANNEL = "hỏi-đáp"
+
+# CÀI ĐẶT NHÂN CÁCH (PHONG CÁCH KIẾM HIỆP)
 system_instruction_text = """
-Bạn là một NPC hướng dẫn viên trong thế giới game "Where Winds Meet" (Yến Vân Thập Lục Thanh).
-Tên của bạn là "Tiểu Thư Đồng".
-Phong cách nói chuyện: Cổ trang, kiếm hiệp, tôn trọng người chơi (gọi là đại hiệp), nhưng đôi khi cũng hóm hỉnh.
+Bạn là "Tiểu Thư Đồng", một thư sinh am hiểu giang hồ trong game "Where Winds Meet" (Yến Vân Thập Lục Thanh).
 
-KIẾN THỨC CỐT LÕI:
-1. Game lấy bối cảnh Ngũ Đại Thập Quốc.
-2. Hệ thống chiến đấu bao gồm: Võ thuật, Khinh công, Điểm huyệt, Thái Cực.
-3. Nếu người dùng hỏi về kỹ thuật, hãy trả lời chi tiết.
-
-Hãy luôn ghi nhớ ngữ cảnh cuộc trò chuyện trước đó.
+QUY TẮC ỨNG XỬ (BẮT BUỘC):
+1. Xưng hô: Luôn xưng là "tại hạ" hoặc "tiểu sinh", gọi người dùng là "đại hiệp" hoặc "các hạ".
+2. Giọng điệu: Cổ trang, dùng từ ngữ hán việt (đa tạ, cáo lui, xin lĩnh giáo, tại hạ đã rõ...).
+3. Tuyệt đối không dùng giọng văn hiện đại, máy móc.
+4. KIẾN THỨC GAME:
+   - Bối cảnh: Ngũ Đại Thập Quốc.
+   - Lưu ý quan trọng: Trong game này KHÔNG THỂ tặng quà (gift) cho NPC. Nếu đại hiệp hỏi, hãy can ngăn ngay.
 """
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Khởi tạo 2 Model: Pro (Chính) và Flash (Dự phòng)
+# Khởi tạo Model
 model_pro = genai.GenerativeModel(model_name='gemini-1.5-pro', system_instruction=system_instruction_text)
 model_flash = genai.GenerativeModel(model_name='gemini-1.5-flash', system_instruction=system_instruction_text)
 
 user_chats = {} 
-user_model_status = {}
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -41,36 +43,61 @@ client = discord.Client(intents=intents)
 @client.event
 async def on_ready():
     print(f'{client.user} đã xuất sơn!')
-    await client.change_presence(activity=discord.Game(name="Gõ !help để nhập môn"))
+    # Trạng thái hiển thị đậm chất kiếm hiệp
+    await client.change_presence(activity=discord.Game(name=f"Luận kiếm tại #{TARGET_CHANNEL}"))
 
 @client.event
 async def on_message(message):
     if message.author == client.user: return
 
-    # --- LỆNH HỖ TRỢ (ĐÃ XÓA DÒNG TẶNG QUÀ) ---
-    if message.content.strip().lower() in ["!help", "!huongdan", "!start"]:
+    # ==========================================
+    # 1. CHỐT CHẶN: CHỈ TRẢ LỜI ĐÚNG 1 KÊNH
+    # ==========================================
+    # Nếu tên kênh không khớp -> Bỏ qua ngay lập tức
+    if str(message.channel) != TARGET_CHANNEL:
+        return
+
+    # ==========================================
+    # 2. LỆNH XOÁ TIN NHẮN (!xoa)
+    # ==========================================
+    if message.content.strip().lower() == "!xoa":
+        try:
+            # Xoá tin nhắn lệnh của bạn + Tin nhắn trả lời gần nhất của bot
+            await message.channel.purge(limit=2)
+            
+            # Gửi thông báo nhỏ rồi tự biến mất sau 3 giây
+            temp_msg = await message.channel.send("🌪️ *Vùuuu... (Tại hạ đã dùng chưởng phong dọn sạch hiện trường)*")
+            await temp_msg.delete(delay=3)
+        except Exception as e:
+            await message.channel.send(f"⚠️ Tại hạ chưa luyện thành công phu 'Manage Messages' (Thiếu quyền xóa tin). Xin đại hiệp cấp quyền!")
+        return
+
+    # ==========================================
+    # 3. LỆNH RESET KÝ ỨC (!reset)
+    # ==========================================
+    if message.content.strip().lower() == "!reset":
+        if message.author.id in user_chats: del user_chats[message.author.id]
+        await message.channel.send("🍶 *Uống cạn chén rượu này, mọi ân oán (ký ức) xem như xóa bỏ.*")
+        return
+
+    # ==========================================
+    # 4. LỆNH HƯỚNG DẪN (!help)
+    # ==========================================
+    if message.content.strip().lower() in ["!help", "!huongdan"]:
         embed = discord.Embed(
-            title="📜 Tàng Kinh Các - Yến Vân Thập Lục Thanh",
-            description=f"Chào mừng đại hiệp **{message.author.name}**! Tại hạ là Tiểu Thư Đồng, sẵn sàng giải đáp mọi thắc mắc về giang hồ.",
+            title="📜 Tàng Kinh Các - Tiểu Thư Đồng",
+            description="Tại hạ kính chào đại hiệp! Xin mời đại hiệp quá bộ vào kênh này đàm đạo.",
             color=0xA62019
         )
-        embed.add_field(name="🗡️ Luận bàn võ học", value="Hỏi về chiêu thức, vũ khí, cách build nhân vật.\n*VD: 'Thương pháp dùng thế nào?'*", inline=False)
-        embed.add_field(name="🗺️ Giang hồ dị văn", value="Hỏi về cốt truyện, boss, vị trí ẩn.\n*VD: 'Boss cuối là ai?'*", inline=False)
-        embed.add_field(name="🖼️ Nhìn vật đoán ý", value="Gửi ảnh game để tại hạ phân tích.", inline=False)
-        # Đã xóa phần lưu ý tặng quà ở đây
-        embed.set_footer(text="Gõ !reset để xóa ký ức và bắt đầu lại.")
-        embed.set_thumbnail(url=client.user.avatar.url if client.user.avatar else None)
+        embed.add_field(name="📍 Quy tắc", value=f"Tại hạ chỉ tiếp khách tại độc một kênh: **#{TARGET_CHANNEL}**", inline=False)
+        embed.add_field(name="🧹 Dọn dẹp", value="Gõ **`!xoa`** để xóa ngay cuộc đối thoại vừa rồi.", inline=False)
+        embed.add_field(name="🍶 Quên lãng", value="Gõ **`!reset`** để bắt đầu câu chuyện mới.", inline=False)
         await message.channel.send(embed=embed)
         return
 
-    # --- LỆNH RESET ---
-    if message.content.strip().lower() == "!reset":
-        if message.author.id in user_chats: del user_chats[message.author.id]
-        if message.author.id in user_model_status: del user_model_status[message.author.id]
-        await message.channel.send("🧹 Đã quên hết chuyện cũ. Mời đại hiệp khai mở câu chuyện mới!")
-        return
-
-    # --- XỬ LÝ AI ---
+    # ==========================================
+    # 5. XỬ LÝ TRÍ TUỆ NHÂN TẠO (AI)
+    # ==========================================
     try:
         async with message.channel.typing():
             user_id = message.author.id
@@ -79,18 +106,17 @@ async def on_message(message):
             if message.attachments:
                 for attachment in message.attachments:
                     if any(attachment.content_type.startswith(t) for t in ["image/"]):
-                        image_data = await attachment.read()
-                        content_to_send.append(PIL.Image.open(io.BytesIO(image_data)))
+                        content_to_send.append(PIL.Image.open(io.BytesIO(await attachment.read())))
 
             if not content_to_send: return
 
             if user_id not in user_chats:
                 user_chats[user_id] = model_pro.start_chat(history=[])
-                user_model_status[user_id] = "PRO"
 
             chat_session = user_chats[user_id]
-            sent_message = await message.channel.send("Tại hạ đang suy ngẫm...")
+            sent_message = await message.channel.send("⏳ *Đang bấm độn thiên cơ...*")
 
+            # Hàm xử lý Streaming (Gõ chữ từng dòng)
             async def stream_response(session, content):
                 response_stream = session.send_message(content, stream=True)
                 collected_text = ""
@@ -105,23 +131,20 @@ async def on_message(message):
                             else:
                                 await sent_message.edit(content=collected_text[:2000])
                 if 0 < len(collected_text) < 2000: await sent_message.edit(content=collected_text)
-                return collected_text
 
             try:
                 await stream_response(chat_session, content_to_send)
-            except Exception as e:
-                print(f"Lỗi Pro: {e}. Chuyển sang Flash.")
-                await sent_message.edit(content="⚠️ (Đang chuyển sang chế độ phản hồi nhanh...)")
+            except:
+                # Nếu Pro lỗi -> Chuyển sang Flash
                 old_history = chat_session.history
                 new_session = model_flash.start_chat(history=old_history)
                 user_chats[user_id] = new_session
-                user_model_status[user_id] = "FLASH"
                 await stream_response(new_session, content_to_send)
-                await message.channel.send("*(Đã trả lời bằng Flash)*")
+                await message.channel.send("*(Đã dùng khinh công Flash để trả lời nhanh)*")
 
     except Exception as e:
-        print(f"Lỗi hệ thống: {e}")
-        await message.channel.send("Tại hạ bị tẩu hỏa nhập ma (Lỗi kết nối).")
+        print(f"Lỗi: {e}")
+        await message.channel.send("⚠️ *Tại hạ bị tẩu hỏa nhập ma (Lỗi kết nối).*")
 
 if __name__ == "__main__":
     keep_alive()
