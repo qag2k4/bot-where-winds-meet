@@ -179,20 +179,47 @@ def summarize_image(pil_image: Image.Image) -> str:
         return "(Không thể tóm tắt ảnh)"
 
 # ---------------------------
-# Gemini call (Vision)
+# Cooldown System (Improved)
+# ---------------------------
+import time
+USER_COOLDOWN = {}
+
+def is_on_cooldown(user_id: int):
+    now = time.time()
+    if user_id not in USER_COOLDOWN:
+        return False, 0
+    expire = USER_COOLDOWN[user_id]
+    if now < expire:
+        return True, round(expire - now, 1)
+    return False, 0
+
+def set_cooldown(user_id: int):
+    USER_COOLDOWN[user_id] = time.time() + COOLDOWN_SECONDS
+
+# ---------------------------
+_user_last_call = {}
+
+def is_on_cooldown(user_id):
+    now = time.time()
+    last = _user_last_call.get(user_id)
+    if last and now - last < COOLDOWN_SECONDS:
+        return True, COOLDOWN_SECONDS - (now - last)
+    _user_last_call[user_id] = now
+    return False, 0
+
+# ---------------------------
+# Gemini call (Vision) - FIXED FORMAT
 # ---------------------------
 async def gemini_send(user_text: str, system_text: str, images: Optional[List[Image.Image]] = None):
     if not ai_enabled:
         return type('obj', (object,), {'text': "Chưa cấu hình API Key hoặc Key lỗi."})
 
-    # Build payload for Gemini Vision: system + user parts (text + binary images)
+    # Build Gemini Vision payload as a list: text parts and binary image parts (no roles)
     parts = []
     if system_text:
         parts.append(system_text)
     if user_text:
         parts.append(user_text)
-
-    # If images present, attach as binary parts
     if images:
         for img in images:
             bio = io.BytesIO()
@@ -200,22 +227,19 @@ async def gemini_send(user_text: str, system_text: str, images: Optional[List[Im
             bio.seek(0)
             parts.append({"mime_type": "image/png", "data": bio.read()})
 
-    payload = [{"role": "system", "parts": [system_text]}, {"role": "user", "parts": parts}]
-
     model = genai.GenerativeModel(MODEL_VISION)
     last_exc = None
     async with _api_semaphore:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 result = await model.generate_content_async(
-                    payload,
+                    parts,
                     generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS, "temperature": 0.6},
                     safety_settings="BLOCK_ONLY_HIGH",
                 )
-                # Normalize response
+                # Prefer result.text if present
                 if hasattr(result, 'text') and result.text:
                     return result
-                # Try candidates
                 txt = getattr(result, 'text', None)
                 if not txt and hasattr(result, 'candidates'):
                     cand = result.candidates
@@ -240,7 +264,6 @@ intents.message_content = True
 intents.reactions = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-_user_last_call = {}
 _user_persona = {}
 
 @bot.event
@@ -326,6 +349,9 @@ async def on_message(message: discord.Message):
                     pass
 
             await save_chat(message.author.id, message.channel.id, 'bot', persona_key, reply_text)
+
+            # Apply cooldown after success
+            set_cooldown(message.author.id)
         except Exception as e:
             traceback.print_exc()
             await message.channel.send("⚠️ Lỗi không xác định. Xin hãy thử lại sau.")
