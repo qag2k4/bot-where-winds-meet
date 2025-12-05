@@ -11,6 +11,11 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
+# ---------------------------
+# keep_alive (Render ping)
+# ---------------------------
+from keep_alive import keep_alive
+
 # Optional: Gemini SDK
 try:
     import google.generativeai as genai
@@ -27,7 +32,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", None)
 TARGET_CHANNELS = ["hoi-dap"]
 
-COOLDOWN_SECONDS = 2   # 🔥 Cooldown mới = 2 giây
+COOLDOWN_SECONDS = 2   # Cooldown = 2 giây
 
 DB_PATH = "ekko_bot.sqlite"
 
@@ -36,7 +41,8 @@ PERSONAS = {
         "name": "Tiểu Thư Đồng",
         "system": (
             "Bạn là 'Tiểu Thư Đồng', NPC hướng dẫn game Where Winds Meet.\n"
-            "QUY TẮC:\n1. Xưng hô: Tại hạ / Đại hiệp.\n2. Giọng điệu: Cổ trang, kiếm hiệp, ngắn gọn.\n3. Tuyệt đối KHÔNG hướng dẫn tặng quà NPC."
+            "QUY TẮC:\n1. Xưng hô: Tại hạ / Đại hiệp.\n2. Giọng điệu: Cổ trang, kiếm hiệp, ngắn gọn.\n"
+            "3. Tuyệt đối KHÔNG hướng dẫn tặng quà NPC."
         )
     }
 }
@@ -75,8 +81,8 @@ tree = bot.tree
 # ---------------------------
 # Cooldown + persona memory
 # ---------------------------
-_user_last_call = {}      
-_user_persona = {}        
+_user_last_call = {}
+_user_persona = {}
 
 # ---------------------------
 # Database
@@ -183,7 +189,7 @@ async def slash_set_persona(interaction: discord.Interaction, persona_key: str):
     await interaction.response.send_message(f"Đã đổi persona → `{persona_key}`", ephemeral=True)
 
 # ---------------------------
-# Ready
+# Ready event
 # ---------------------------
 @bot.event
 async def on_ready():
@@ -244,7 +250,6 @@ async def on_message(message):
         return
 
     persona = _user_persona.get(message.author.id, DEFAULT_PERSONA)
-    system_instruction = PERSONAS[persona]["system"]
 
     chat_session = None
     if ai_enabled:
@@ -312,9 +317,10 @@ async def on_reaction_add(reaction, user):
         traceback.print_exc()
 
 # ---------------------------
-# Start bot
+# START BOT + KEEP ALIVE
 # ---------------------------
 if __name__ == "__main__":
+    keep_alive()
     if not DISCORD_TOKEN:
         print("ERROR: DISCORD_TOKEN missing")
         raise SystemExit(1)
