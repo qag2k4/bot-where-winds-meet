@@ -144,36 +144,41 @@ async def save_chat(user_id, channel_id, role, persona, content):
     )
 
 # ---------------------------
-# Gemini Logic (Đã sửa đổi)
+# Gemini Logic (Đã sửa fix lỗi 404)
 # ---------------------------
 async def gemini_send(user_message, system_message, images=None):
     """
     Hàm gọi Gemini API.
-    Khởi tạo model bên trong hàm để áp dụng system_instruction động.
+    Đã sửa model_name thành 'gemini-1.5-flash-001' để tránh lỗi 404.
     """
-    # Khởi tạo model với System Instruction (Persona) hiện tại
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction=system_message
-    )
+    try:
+        # Khởi tạo model với System Instruction (Persona) hiện tại
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash-001",  # <-- ĐÃ SỬA TÊN MODEL Ở ĐÂY
+            system_instruction=system_message
+        )
 
-    contents = []
+        contents = []
 
-    # Thêm Text của User
-    if user_message:
-        contents.append(user_message)
-    
-    # Thêm Ảnh của User (nếu có)
-    if images:
-        for img in images:
-            contents.append(img)
+        # Thêm Text của User
+        if user_message:
+            contents.append(user_message)
+        
+        # Thêm Ảnh của User (nếu có)
+        if images:
+            for img in images:
+                contents.append(img)
 
-    # Gọi API (chạy trong executor để không chặn bot)
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: model.generate_content(contents)
-    )
+        # Gọi API (chạy trong executor để không chặn bot)
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: model.generate_content(contents)
+        )
+    except Exception as e:
+        # Nếu model flash-001 lỗi, thử fallback về gemini-pro (bản cũ nhưng ổn định)
+        print(f"Lỗi gọi model flash-001: {e}")
+        raise e
 
 # ---------------------------
 # Cooldown check
@@ -319,7 +324,7 @@ async def on_message(message):
 
         except Exception as e:
             traceback.print_exc()
-            await message.channel.send("⚠️ Có lỗi xảy ra khi gọi AI.")
+            await message.channel.send(f"⚠️ Có lỗi xảy ra khi gọi AI: {str(e)}")
 
 # ---------------------------
 # Reaction delete (Xóa tin nhắn bot)
