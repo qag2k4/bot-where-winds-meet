@@ -1,14 +1,10 @@
 # -*- coding: utf-8 -*-
-# Ekko Bot — Phiên bản A (Hỗ trợ Gemini Vision thật sự)
-# ---
-# Bản hoàn chỉnh của bot Ekko, tối ưu cho Gemini Vision (nếu API key hỗ trợ Vision).
-# Tính năng chính:
-# - Xử lý ảnh upload từ Discord và gửi trực tiếp cho Gemini Vision
-# - Persona: Cửu Lưu Manh (giang hồ, cà khịa mạnh, xưng hô kiếm hiệp)
-# - Chỉ phân tích ảnh liên quan Where Winds Meet
-# - Fallback: nếu không đọc được ảnh -> trả lời "bị mù"
-# - Lưu lịch sử chat vào SQLite
-# - Hạn chế concurrency để giảm rate-limit
+# Ekko Bot — Bản hoàn chỉnh (Text-only, cải tiến theo yêu cầu)
+# - Không đọc ảnh
+# - Tăng độ cà khịa (Cửu Lưu Manh)
+# - Tối ưu concurrency / tốc độ
+# - Cải thiện prompt + nhớ lịch sử (memory)
+# - Thêm slash commands: /help, /reset, /set-persona, /history
 
 import os
 import io
@@ -18,14 +14,14 @@ import sqlite3
 import datetime
 import traceback
 import logging
-from typing import List, Optional
+from typing import Optional, List, Tuple
 
 import discord
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 
-# Gemini SDK (optional)
+# Gemini SDK (text-only)
 try:
     import google.generativeai as genai
     GEMINI_AVAILABLE = True
@@ -33,37 +29,31 @@ except Exception:
     genai = None
     GEMINI_AVAILABLE = False
 
-from PIL import Image
-
 # ---------------------------
 # Load .env
 # ---------------------------
 load_dotenv()
 
-# ---------------------------
-# Config
-# ---------------------------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TARGET_CHANNELS = os.getenv("TARGET_CHANNELS", "hoi-dap").split(",")
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "2"))
 DB_PATH = os.getenv("DB_PATH", "ekko_bot.sqlite")
-
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1024"))
 API_CONCURRENCY = int(os.getenv("API_CONCURRENCY", "2"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+HISTORY_MESSAGES = int(os.getenv("HISTORY_MESSAGES", "6"))  # number of recent messages to include as context
 
-# ---------------------------
-# Persona (Cửu Lưu Manh)
-# ---------------------------
+# Model TEXT ONLY (Free-ish)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "models/gemini-1.5-flash")
+
+# Persona: Cửu Lưu Manh (cà khịa mạnh)
 PERSONA_NAME = "Cửu Lưu Manh"
 PERSONA_SYSTEM = (
-    "Bạn là Cửu Lưu Manh — tên giang hồ lõi đời, miệng lưỡi sắc bén, cà khịa nặng tay nhưng tuyệt đối không thất lễ với bằng hữu. "
-    "Phong thái kiếm hiệp, xưng hô theo giang hồ: 'tại hạ', 'bằng hữu', 'đại hiệp'. "
-    "Chỉ phân tích Where Winds Meet — tuyệt đối KHÔNG đoán game khác. "
-    "Khi người dùng gửi ảnh, phải lập tức phân tích: OCR chữ, dấu chỉ nhiệm vụ, bản đồ, UI, icon, vị trí, vật phẩm… "
-    "Nếu ảnh liên quan đến nhiệm vụ, tự động suy luận nhiệm vụ, giải thích và hướng dẫn bước tiếp theo. "
-    "Giọng lém lỉnh, phong trần, cà khịa mạnh nhưng luôn hỗ trợ chính xác."
+    "Bạn là Cửu Lưu Manh — lão giang hồ lém lỉnh, miệng lưỡi sắc bén, thích cà khịa nặng tay nhưng vẫn có "
+    "lòng nhân nghĩa. Xưng hô theo phong cách kiếm hiệp: 'tại hạ', 'bằng hữu', 'đại hiệp'. "
+    "CHỈ HỖ TRỢ Where Winds Meet. Nếu người dùng gửi ảnh, hãy trả lời: 'Tại hạ mù lòa không đọc ảnh'. "
+    "KHI TRẢ LỜI: dùng giọng lém lỉnh, phong trần, cà khịa mạnh (không chửi tục), đưa hướng dẫn cụ thể, bước-by-step, ví dụ thực tế trong game."
 )
 
 # ---------------------------
@@ -77,22 +67,20 @@ logger = logging.getLogger("ekko")
 # ---------------------------
 ai_enabled = False
 _api_semaphore = asyncio.Semaphore(API_CONCURRENCY)
-MODEL_VISION = "gemini-1.5-pro"
 if GEMINI_AVAILABLE and GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         ai_enabled = True
-        logger.info("✅ Gemini configured.")
+        logger.info("✅ Gemini TEXT mode configured.")
     except Exception as e:
-        logger.exception("❌ Gemini config error: %s", e)
         ai_enabled = False
+        logger.exception("❌ Gemini init error: %s", e)
 else:
-    logger.info("ℹ️ Gemini disabled (no key or SDK).")
+    logger.info("ℹ️ Gemini disabled or SDK missing.")
 
 # ---------------------------
-# Database helpers
+# Database (async wrappers)
 # ---------------------------
-
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -114,7 +102,7 @@ def init_db():
 
 init_db()
 
-async def db_execute(query, params=()):
+async def db_execute(query: str, params: Tuple = ()):  # type: ignore
     loop = asyncio.get_running_loop()
     def _exec():
         conn = sqlite3.connect(DB_PATH)
@@ -124,7 +112,7 @@ async def db_execute(query, params=()):
         conn.close()
     await loop.run_in_executor(None, _exec)
 
-async def db_fetchall(query, params=()):
+async def db_fetchall(query: str, params: Tuple = ()):  # type: ignore
     loop = asyncio.get_running_loop()
     def _fetch():
         conn = sqlite3.connect(DB_PATH)
@@ -135,141 +123,141 @@ async def db_fetchall(query, params=()):
         return rows
     return await loop.run_in_executor(None, _fetch)
 
-async def save_chat(user_id, channel_id, role, persona, content):
+async def save_chat(uid: int, cid: int, role: str, persona: str, content: str):
     ts = datetime.datetime.utcnow().isoformat()
     await db_execute(
         "INSERT INTO chats (user_id, channel_id, role, persona, content, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, channel_id, role, persona, content, ts)
+        (uid, cid, role, persona, content, ts)
     )
 
-# ---------------------------
-# Utils for images
-# ---------------------------
-
-def is_attachment_image(att: discord.Attachment) -> bool:
-    try:
-        if hasattr(att, 'content_type') and att.content_type and att.content_type.startswith("image/"):
-            return True
-    except Exception:
-        pass
-    name = getattr(att, 'filename', '') or getattr(att, 'name', '')
-    return bool(name and name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')))
-
-async def attachment_to_pil(att: discord.Attachment) -> Optional[Image.Image]:
-    try:
-        data = await att.read()
-        img = Image.open(io.BytesIO(data)).convert("RGB")
-        return img
-    except Exception as e:
-        logger.exception("Failed to read attachment %s: %s", getattr(att, 'filename', 'unknown'), e)
-        return None
-
-def summarize_image(pil_image: Image.Image) -> str:
-    try:
-        w, h = pil_image.size
-        mode = pil_image.mode
-        avg = pil_image.resize((1,1)).getpixel((0,0))
-        if isinstance(avg, int):
-            avg_str = str(avg)
-        else:
-            avg_str = ",".join(str(int(x)) for x in avg)
-        return f"Kích thước: {w}x{h}; Mode: {mode}; Màu trung bình: {avg_str}"
-    except Exception as e:
-        logger.exception("Failed to summarize image: %s", e)
-        return "(Không thể tóm tắt ảnh)"
+async def fetch_recent_history(cid: int, limit: int = HISTORY_MESSAGES) -> List[Tuple]:
+    rows = await db_fetchall(
+        "SELECT role, persona, content, timestamp FROM chats WHERE channel_id = ? ORDER BY id DESC LIMIT ?",
+        (cid, limit)
+    )
+    # rows returned newest first; reverse to chronological
+    return list(reversed(rows))
 
 # ---------------------------
-# Cooldown System (Improved)
+# Cooldown (improved)
 # ---------------------------
-import time
-USER_COOLDOWN = {}
+_user_last = {}
 
-def is_on_cooldown(user_id: int):
+def is_on_cooldown(uid: int):
     now = time.time()
-    if user_id not in USER_COOLDOWN:
-        return False, 0
-    expire = USER_COOLDOWN[user_id]
-    if now < expire:
-        return True, round(expire - now, 1)
-    return False, 0
-
-def set_cooldown(user_id: int):
-    USER_COOLDOWN[user_id] = time.time() + COOLDOWN_SECONDS
-
-# ---------------------------
-_user_last_call = {}
-
-def is_on_cooldown(user_id):
-    now = time.time()
-    last = _user_last_call.get(user_id)
+    last = _user_last.get(uid)
     if last and now - last < COOLDOWN_SECONDS:
         return True, COOLDOWN_SECONDS - (now - last)
-    _user_last_call[user_id] = now
     return False, 0
 
+def set_cooldown(uid: int):
+    _user_last[uid] = time.time()
+
 # ---------------------------
-# Gemini call (Vision) - FIXED FORMAT
+# Prompt builder (uses recent history)
 # ---------------------------
-async def gemini_send(user_text: str, system_text: str, images: Optional[List[Image.Image]] = None):
+def build_prompt(system_text: str, history: List[Tuple], user_text: str) -> str:
+    """Build a compact prompt including persona system, a few recent messages, and current user prompt."""
+    parts = [system_text]
+    if history:
+        parts.append("-- Bối cảnh hội thoại gần đây --")
+        for role, persona, content, ts in history:
+            # role: 'user' or 'bot'
+            label = 'Đại hiệp' if role == 'user' else (persona or 'Bot')
+            parts.append(f"[{label}] {content}")
+    parts.append("-- Yêu cầu hiện tại --")
+    parts.append(user_text)
+    # join with double newlines to keep tokens low but readable
+    return "\n\n".join(parts)
+
+# ---------------------------
+# Gemini TEXT (with history)
+# ---------------------------
+async def gemini_text_with_history(system_text: str, user_text: str, channel_id: int):
     if not ai_enabled:
-        return type('obj', (object,), {'text': "Chưa cấu hình API Key hoặc Key lỗi."})
+        return "Chưa cấu hình API key hoặc key lỗi."
 
-    # Build Gemini Vision payload as a list: text parts and binary image parts (no roles)
-    parts = []
-    if system_text:
-        parts.append(system_text)
-    if user_text:
-        parts.append(user_text)
-    if images:
-        for img in images:
-            bio = io.BytesIO()
-            img.save(bio, format='PNG')
-            bio.seek(0)
-            parts.append({"mime_type": "image/png", "data": bio.read()})
+    history = await fetch_recent_history(channel_id, HISTORY_MESSAGES)
+    prompt = build_prompt(system_text, history, user_text)
 
-    model = genai.GenerativeModel(MODEL_VISION)
+    model = genai.GenerativeModel(GEMINI_MODEL)
     last_exc = None
+
     async with _api_semaphore:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 result = await model.generate_content_async(
-                    parts,
-                    generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS, "temperature": 0.6},
+                    [prompt],
+                    generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS, "temperature": 0.7},
                     safety_settings="BLOCK_ONLY_HIGH",
                 )
-                # Prefer result.text if present
+                # Normalize response
                 if hasattr(result, 'text') and result.text:
-                    return result
+                    return result.text
                 txt = getattr(result, 'text', None)
                 if not txt and hasattr(result, 'candidates'):
                     cand = result.candidates
                     if isinstance(cand, list) and cand:
                         txt = getattr(cand[0], 'content', None) or getattr(cand[0], 'text', None)
                 if txt:
-                    return type('obj', (object,), {'text': txt})
-                return result
+                    return txt
+                return str(result)
             except Exception as e:
                 last_exc = e
                 logger.warning("Gemini attempt %s failed: %s", attempt, repr(e))
                 if attempt == MAX_RETRIES:
                     logger.error("Gemini all attempts failed: %s", repr(last_exc))
-                    return type('obj', (object,), {'text': "⚠️ Lỗi kết nối Gemini Vision. Vui lòng thử lại sau."})
-                await asyncio.sleep(min(2 ** attempt, 8))
+                    return "⚠️ Kết nối tới Gemini thất bại."
+                await asyncio.sleep(min(1.5 * attempt, 8))
 
 # ---------------------------
-# Discord bot
+# Discord Bot + Slash commands
 # ---------------------------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+tree = bot.tree
 
+# persona per-user (allow changing)
 _user_persona = {}
+
+@tree.command(name="help", description="Hướng dẫn dùng bot Ekko")
+async def slash_help(interaction: discord.Interaction):
+    embed = discord.Embed(title="📜 Tàng Kinh Các", description="Hướng dẫn sử dụng", color=0xA62019)
+    embed.add_field(name="Hoạt động tại", value=", ".join(TARGET_CHANNELS), inline=False)
+    embed.add_field(name="Lệnh", value="`/help`, `/reset`, `/set-persona`, `/history`", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@tree.command(name="reset", description="Xóa lịch sử chat của bạn trong kênh này")
+async def slash_reset(interaction: discord.Interaction):
+    await db_execute("DELETE FROM chats WHERE user_id = ? AND channel_id = ?", (interaction.user.id, interaction.channel.id))
+    _user_persona.pop(interaction.user.id, None)
+    await interaction.response.send_message("🍶 Đã quên chuyện cũ.", ephemeral=True)
+
+@tree.command(name="set-persona", description="Đổi nhân vật (ví dụ: Cửu Lưu Manh)")
+@app_commands.describe(persona_key="Nhập key persona, mặc định Cửu Lưu Manh")
+async def slash_set_persona(interaction: discord.Interaction, persona_key: str):
+    # For now only support the built-in persona name; keep extensible
+    _user_persona[interaction.user.id] = persona_key
+    await interaction.response.send_message(f"Đã đổi persona sang: `{persona_key}`", ephemeral=True)
+
+@tree.command(name="history", description="Hiển thị lịch sử chat gần nhất trong kênh")
+async def slash_history(interaction: discord.Interaction):
+    rows = await fetch_recent_history(interaction.channel.id, HISTORY_MESSAGES)
+    if not rows:
+        await interaction.response.send_message("Không có lịch sử.", ephemeral=True)
+        return
+    texts = []
+    for role, persona, content, ts in rows:
+        label = 'Bạn' if role == 'user' else (persona or 'Bot')
+        texts.append(f"**{label}:** {content}")
+    await interaction.response.send_message("\n".join(texts), ephemeral=True)
 
 @bot.event
 async def on_ready():
     try:
-        await bot.tree.sync()
+        await tree.sync()
         logger.info("Slash commands synced.")
     except Exception as e:
         logger.exception("Sync error: %s", e)
@@ -279,120 +267,76 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
-    # only process messages in target channels (by name)
     channel_name = getattr(message.channel, 'name', None)
     if channel_name not in TARGET_CHANNELS:
         return
 
     await bot.process_commands(message)
 
-    lower = message.content.lower().strip() if message.content else ""
-    if lower.startswith("!help"):
-        await message.channel.send("Dùng `/help` để xem hướng dẫn.")
-        return
-    if lower.startswith("!reset"):
-        await db_execute("DELETE FROM chats WHERE user_id = ? AND channel_id = ?", (message.author.id, message.channel.id))
-        _user_persona.pop(message.author.id, None)
-        await message.channel.send("🍶 Đã quên chuyện cũ.")
+    # If attachments present, reply with 'blind' message
+    if message.attachments:
+        await message.channel.send("👀 Tại hạ mù lòa không đọc được ảnh nữa, gửi chữ đi bằng hữu!")
         return
 
+    user_text = message.content.strip() if message.content else ""
+    if not user_text:
+        return
+
+    # Cooldown check
     on_cd, remain = is_on_cooldown(message.author.id)
     if on_cd:
-        await message.reply(f"⏳ Chờ {int(remain)+1}s.")
+        await message.reply(f"⏳ Đợi {int(remain)+1}s đã bằng hữu.")
         return
 
-    user_text = message.content if message.content else ""
-    images: List[Image.Image] = []
-    if message.attachments:
-        for att in message.attachments:
-            if not is_attachment_image(att):
-                continue
-            img = await attachment_to_pil(att)
-            if img:
-                images.append(img)
-                logger.info("Loaded image %s size=%sx%s", getattr(att, 'filename', 'unknown'), img.width, img.height)
-            else:
-                # Không đọc được ảnh
-                await message.channel.send("👀 Tại hạ bị mù, nhìn không ra tấm ảnh này rồi bằng hữu à… thử gửi lại xem!")
-                return
+    persona = _user_persona.get(message.author.id, PERSONA_NAME)
 
-    if not user_text and not images:
-        return
-
-    persona_key = _user_persona.get(message.author.id, PERSONA_NAME)
-    system_msg = PERSONA_SYSTEM
-
-    await save_chat(message.author.id, message.channel.id, 'user', persona_key, user_text)
+    # Save user message
+    await save_chat(message.author.id, message.channel.id, 'user', persona, user_text)
 
     async with message.channel.typing():
         try:
-            if ai_enabled:
-                result = await gemini_send(user_text, system_msg, images if images else None)
-                reply_text = result.text if hasattr(result, 'text') else str(result)
-            else:
-                reply_text = "Chưa cấu hình API Key hoặc Key lỗi."
-
-            # send reply (split if too long)
-            if len(reply_text) > 2000:
-                for i in range(0, len(reply_text), 1900):
-                    part = reply_text[i:i+1900]
-                    sent = await message.channel.send(part)
-                    try:
-                        await sent.add_reaction("🗑️")
-                    except Exception:
-                        pass
-            else:
-                sent = await message.channel.send(reply_text)
-                try:
-                    await sent.add_reaction("🗑️")
-                except Exception:
-                    pass
-
-            await save_chat(message.author.id, message.channel.id, 'bot', persona_key, reply_text)
-
-            # Apply cooldown after success
-            set_cooldown(message.author.id)
+            reply = await gemini_text_with_history(PERSONA_SYSTEM, user_text, message.channel.id)
+            # Post-process: ensure Cửu Lưu Manh voice — quick heuristic
+            if not reply.startswith('Tại hạ') and 'Cửu Lưu Manh' in PERSONA_SYSTEM:
+                reply = f"Tại hạ nói: {reply}"
         except Exception as e:
-            traceback.print_exc()
-            await message.channel.send("⚠️ Lỗi không xác định. Xin hãy thử lại sau.")
+            logger.exception("Reply error: %s", e)
+            reply = "⚠️ Lỗi không xác định."
 
-@bot.event
-async def on_reaction_add(reaction, user):
-    if user.bot:
-        return
-    msg = reaction.message
-    if msg.author != bot.user or str(reaction.emoji) != "🗑️":
-        return
+    # Send reply (split if too long)
+    if len(reply) > 2000:
+        for i in range(0, len(reply), 1800):
+            part = reply[i:i+1800]
+            sent = await message.channel.send(part)
+            try: await sent.add_reaction('🗑️')
+            except: pass
+    else:
+        sent = await message.channel.send(reply)
+        try: await sent.add_reaction('🗑️')
+        except: pass
 
-    perm = msg.channel.permissions_for(user)
-    if perm.manage_messages:
-        await msg.delete()
-        return
-
-    rows = await db_fetchall("SELECT user_id FROM chats WHERE channel_id = ? ORDER BY id DESC LIMIT 5", (msg.channel.id,))
-    if user.id in [r[0] for r in rows]:
-        await msg.delete()
+    # Save bot reply and set cooldown
+    await save_chat(message.author.id, message.channel.id, 'bot', persona, reply)
+    set_cooldown(message.author.id)
 
 # ---------------------------
 # Run
 # ---------------------------
 if __name__ == '__main__':
-    # keep_alive optional
     try:
         from keep_alive import keep_alive
         keep_alive()
     except Exception:
-        logger.info("keep_alive not found or failed.")
+        logger.info('keep_alive not present')
 
     if not DISCORD_TOKEN:
-        logger.warning("WARNING: Missing DISCORD_TOKEN")
+        logger.warning('Missing DISCORD_TOKEN')
 
     try:
         bot.run(DISCORD_TOKEN)
     except RuntimeError as e:
-        # If event loop is already running (e.g., in REPL), schedule start on existing loop
-        if "asyncio.run() cannot be called from a running event loop" in str(e):
-            logger.info("Event loop already running - scheduling bot.start on existing loop.")
+        if 'asyncio.run() cannot be called from a running event loop' in str(e):
+            logger.info('Event loop already running - scheduling bot.start')
             loop = asyncio.get_event_loop()
             loop.create_task(bot.start(DISCORD_TOKEN))
         else:
