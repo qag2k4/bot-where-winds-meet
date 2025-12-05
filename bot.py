@@ -12,12 +12,12 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 # ---------------------------
-# Load .env (Để chạy local hoặc load biến môi trường an toàn)
+# Load .env
 # ---------------------------
 load_dotenv()
 
 # ---------------------------
-# keep_alive (Render ping)
+# Keep Alive
 # ---------------------------
 try:
     from keep_alive import keep_alive
@@ -35,7 +35,7 @@ except Exception:
 import PIL.Image
 
 # ---------------------------
-# Configuration
+# Cấu hình
 # ---------------------------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", None)
@@ -44,7 +44,7 @@ TARGET_CHANNELS = ["hoi-dap"]
 COOLDOWN_SECONDS = 2
 DB_PATH = "ekko_bot.sqlite"
 
-# Cấu hình Persona
+# Cấu hình Nhân vật
 PERSONAS = {
     "tieu_thu_dong": {
         "name": "Tiểu Thư Đồng",
@@ -71,13 +71,11 @@ if GEMINI_AVAILABLE and GEMINI_API_KEY:
         print("✅ Gemini configured.")
     except Exception as e:
         print("❌ Gemini config error:", repr(e))
-        ai_enabled = False
 else:
     print("ℹ️ Gemini disabled (no key).")
 
-
 # ---------------------------
-# Discord setup
+# Discord Setup
 # ---------------------------
 intents = discord.Intents.default()
 intents.message_content = True
@@ -87,13 +85,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 # ---------------------------
-# Memory Variables
+# Memory
 # ---------------------------
 _user_last_call = {}
 _user_persona = {}
 
 # ---------------------------
-# Database Functions
+# Database
 # ---------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -143,53 +141,73 @@ async def save_chat(user_id, channel_id, role, persona, content):
     )
 
 # ---------------------------
-# Gemini Logic (Đã sửa chữa)
+# Gemini Logic (SUPER SAFE VERSION)
 # ---------------------------
 async def gemini_send(user_message, system_message, images=None):
     """
-    Sử dụng model 'gemini-pro' cho Text (ổn định nhất) và 'gemini-1.5-flash' cho Ảnh.
-    Ghép system_message trực tiếp vào prompt để tránh lỗi API.
+    Hàm này sẽ thử danh sách các model từ mới đến cũ.
+    Cái nào chạy được thì dùng, lỗi thì bỏ qua thử cái tiếp theo.
     """
     
-    # 1. Chuẩn bị nội dung gửi (Prompt ghép)
+    # 1. Ghép nội dung (Prompt Engineering) - Cách này an toàn nhất cho mọi model
     full_prompt = []
-    
-    # Ghép tính cách vào trước câu hỏi
     if user_message:
-        combined_text = f"[HƯỚNG DẪN ẨN]: {system_message}\n\n[NGƯỜI DÙNG HỎI]: {user_message}"
+        combined_text = f"HƯỚNG DẪN HỆ THỐNG: {system_message}\n\nNGƯỜI DÙNG HỎI: {user_message}"
         full_prompt.append(combined_text)
     
-    # Thêm ảnh nếu có
     if images:
         for img in images:
             full_prompt.append(img)
-            
-    # 2. Chọn Model phù hợp
-    # Nếu có ảnh -> Bắt buộc dùng Flash (Pro text không xem được ảnh)
-    # Nếu chỉ có chữ -> Dùng Pro (để tránh lỗi 404 của Flash)
-    if images:
-        target_model_name = "gemini-1.5-flash"
-    else:
-        target_model_name = "gemini-pro"
-    
-    # 3. Gọi API
-    try:
-        model = genai.GenerativeModel(target_model_name)
-        loop = asyncio.get_event_loop()
-        
-        # Gọi hàm generate_content
-        return await loop.run_in_executor(
-            None, 
-            lambda: model.generate_content(full_prompt)
-        )
 
-    except Exception as e:
-        print(f"Lỗi gọi model {target_model_name}: {e}")
-        # Nếu model chính lỗi, trả về object giả để bot không crash
-        return type('obj', (object,), {'text': f"⚠️ Hệ thống AI ({target_model_name}) đang bận hoặc lỗi. Vui lòng thử lại sau."})
+    # 2. Danh sách model để thử (Ưu tiên Flash vì nhanh, sau đó đến Pro)
+    candidate_models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro",
+        "gemini-pro",     # Bản ổn định nhất
+        "gemini-1.0-pro"
+    ]
+    
+    # Nếu có ảnh, chỉ thử các model hỗ trợ Vision
+    if images:
+        candidate_models = [
+            "gemini-1.5-flash", 
+            "gemini-1.5-flash-001", 
+            "gemini-1.5-pro"
+        ]
+
+    loop = asyncio.get_event_loop()
+    last_error = None
+
+    # 3. Vòng lặp thử từng model
+    for model_name in candidate_models:
+        try:
+            # print(f"Đang thử model: {model_name}...") # Debug
+            model = genai.GenerativeModel(model_name)
+            
+            # Gọi API
+            response = await loop.run_in_executor(
+                None, 
+                lambda: model.generate_content(full_prompt)
+            )
+            
+            # Nếu chạy đến đây là thành công, trả về luôn
+            return response
+
+        except Exception as e:
+            # Nếu lỗi, lưu lại và thử cái tiếp theo
+            # print(f"Model {model_name} bị lỗi: {e}")
+            last_error = e
+            continue
+    
+    # 4. Nếu thử hết danh sách mà vẫn lỗi
+    print(f"❌ TẤT CẢ MODEL ĐỀU LỖI. Lỗi cuối cùng: {last_error}")
+    # Trả về object giả để không crash bot
+    return type('obj', (object,), {'text': f"⚠️ Hệ thống AI đang bảo trì (Lỗi kết nối API). Vui lòng thử lại sau."})
 
 # ---------------------------
-# Cooldown check
+# Cooldown
 # ---------------------------
 def is_on_cooldown(user_id):
     now = time.time()
@@ -200,64 +218,53 @@ def is_on_cooldown(user_id):
     return False, 0
 
 # ---------------------------
-# Slash commands
+# Slash Commands
 # ---------------------------
 @tree.command(name="help", description="Hướng dẫn dùng bot Ekko")
 async def slash_help(interaction: discord.Interaction):
-    embed = discord.Embed(title="📜 Tàng Kinh Các", description="Hướng dẫn sử dụng bot", color=0xA62019)
-    embed.add_field(name="Kênh hoạt động", value=", ".join(TARGET_CHANNELS), inline=False)
+    embed = discord.Embed(title="📜 Tàng Kinh Các", description="Hướng dẫn sử dụng", color=0xA62019)
+    embed.add_field(name="Hoạt động tại", value=", ".join(TARGET_CHANNELS), inline=False)
+    embed.add_field(name="Lệnh", value="`/help`, `/reset`, `/set-persona`", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@tree.command(name="reset", description="Reset lịch sử chat")
+@tree.command(name="reset", description="Xóa lịch sử chat")
 async def slash_reset(interaction: discord.Interaction):
     await db_execute("DELETE FROM chats WHERE user_id = ? AND channel_id = ?", (interaction.user.id, interaction.channel.id))
     _user_persona.pop(interaction.user.id, None)
     await interaction.response.send_message("🍶 Đã quên chuyện cũ.", ephemeral=True)
 
-@tree.command(name="set-persona", description="Đổi persona")
+@tree.command(name="set-persona", description="Đổi nhân vật")
 @app_commands.describe(persona_key="Nhập key (VD: tieu_thu_dong)")
 async def slash_set_persona(interaction: discord.Interaction, persona_key: str):
     if persona_key not in PERSONAS:
-        await interaction.response.send_message(f"Không có persona này.", ephemeral=True)
+        await interaction.response.send_message(f"Không tìm thấy persona này.", ephemeral=True)
         return
     _user_persona[interaction.user.id] = persona_key
     await interaction.response.send_message(f"Đã đổi sang: `{persona_key}`", ephemeral=True)
 
 # ---------------------------
-# Ready event
+# Events
 # ---------------------------
 @bot.event
 async def on_ready():
     try:
         await tree.sync()
         print("Slash commands synced.")
-        
-        # --- DEBUG: In danh sách model có sẵn ---
-        if ai_enabled:
-            print("\n--- Available Models ---")
-            try:
-                for m in genai.list_models():
-                    if 'generateContent' in m.supported_generation_methods:
-                        print(f"- {m.name}")
-            except Exception:
-                pass
-            print("------------------------\n")
-            
     except Exception as e:
         print("Sync error:", repr(e))
     print(f"Logged in as {bot.user}")
 
-# ---------------------------
-# Message handler
-# ---------------------------
 @bot.event
 async def on_message(message):
     if message.author == bot.user: return
     if str(message.channel.name) not in TARGET_CHANNELS: return
 
     await bot.process_commands(message)
-    lower = message.content.lower().strip()
 
+    lower = message.content.lower().strip()
+    if lower.startswith("!help"):
+        await message.channel.send("Dùng `/help` để xem hướng dẫn.")
+        return
     if lower.startswith("!reset"):
         await db_execute("DELETE FROM chats WHERE user_id = ? AND channel_id = ?", (message.author.id, message.channel.id))
         _user_persona.pop(message.author.id, None)
@@ -293,9 +300,8 @@ async def on_message(message):
                 result = await gemini_send(user_text, system_msg, image_list)
                 reply_text = result.text if hasattr(result, "text") else str(result)
             else:
-                reply_text = "Chưa cấu hình API Key."
+                reply_text = "Chưa cấu hình API Key hoặc Key lỗi."
 
-            # Xử lý tin nhắn dài
             if len(reply_text) > 2000:
                 for i in range(0, len(reply_text), 1900):
                     sent = await message.channel.send(reply_text[i:i+1900])
@@ -303,15 +309,12 @@ async def on_message(message):
             else:
                 sent = await message.channel.send(reply_text)
                 await sent.add_reaction("🗑️")
-            
+
             await save_chat(message.author.id, message.channel.id, "bot", persona_key, reply_text)
         except Exception as e:
             traceback.print_exc()
-            await message.channel.send("⚠️ Lỗi xử lý.")
+            await message.channel.send("⚠️ Lỗi không xác định.")
 
-# ---------------------------
-# Reaction delete
-# ---------------------------
 @bot.event
 async def on_reaction_add(reaction, user):
     if user.bot: return
@@ -327,11 +330,8 @@ async def on_reaction_add(reaction, user):
     if user.id in [r[0] for r in rows]:
         await msg.delete()
 
-# ---------------------------
-# START BOT
-# ---------------------------
 if __name__ == "__main__":
     keep_alive()
     if not DISCORD_TOKEN:
-        print("WARNING: DISCORD_TOKEN is missing!")
+        print("WARNING: Missing DISCORD_TOKEN")
     bot.run(DISCORD_TOKEN)
