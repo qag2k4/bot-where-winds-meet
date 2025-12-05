@@ -234,8 +234,8 @@ async def _local_persona_fallback(system_text: str, user_text: str) -> str:
             f"🍶 Hỏi đúng chỗ! Tại hạ tóm tắt: làm bước A, nếu không được hãy làm bước B."
         ])
     return random.choice([
-        f"🍶 Ta nghe ngươi: '{safe_user}'. Kể rõ hơn, tại hạ sẽ phân tích kỹ.",
-        f"🍶 Ồ ho, {safe_user}? Tiếp tục nói cho rõ để tại hạ nắn nót câu trả lời.",
+        "🍶 Ừm… kể rõ hơn một chút để tại hạ tiện bề luận giải.",
+        f"🍶 Ồ ho, {safe_user}? Nói rõ thêm để tại hạ phân tích cho tường tận.",
     ])
 
 # ---------------------------
