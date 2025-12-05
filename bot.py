@@ -179,31 +179,20 @@ def summarize_image(pil_image: Image.Image) -> str:
         return "(Không thể tóm tắt ảnh)"
 
 # ---------------------------
-# Cooldown
-# ---------------------------
-_user_last_call = {}
-
-def is_on_cooldown(user_id):
-    now = time.time()
-    last = _user_last_call.get(user_id)
-    if last and now - last < COOLDOWN_SECONDS:
-        return True, COOLDOWN_SECONDS - (now - last)
-    _user_last_call[user_id] = now
-    return False, 0
-
-# ---------------------------
-# Gemini call (Vision) - FIXED FORMAT
+# Gemini call (Vision)
 # ---------------------------
 async def gemini_send(user_text: str, system_text: str, images: Optional[List[Image.Image]] = None):
     if not ai_enabled:
         return type('obj', (object,), {'text': "Chưa cấu hình API Key hoặc Key lỗi."})
 
-    # Build Gemini Vision payload as a list: text parts and binary image parts (no roles)
+    # Build payload for Gemini Vision: system + user parts (text + binary images)
     parts = []
     if system_text:
         parts.append(system_text)
     if user_text:
         parts.append(user_text)
+
+    # If images present, attach as binary parts
     if images:
         for img in images:
             bio = io.BytesIO()
@@ -211,19 +200,22 @@ async def gemini_send(user_text: str, system_text: str, images: Optional[List[Im
             bio.seek(0)
             parts.append({"mime_type": "image/png", "data": bio.read()})
 
+    payload = [{"role": "system", "parts": [system_text]}, {"role": "user", "parts": parts}]
+
     model = genai.GenerativeModel(MODEL_VISION)
     last_exc = None
     async with _api_semaphore:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 result = await model.generate_content_async(
-                    parts,
+                    payload,
                     generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS, "temperature": 0.6},
                     safety_settings="BLOCK_ONLY_HIGH",
                 )
-                # Prefer result.text if present
+                # Normalize response
                 if hasattr(result, 'text') and result.text:
                     return result
+                # Try candidates
                 txt = getattr(result, 'text', None)
                 if not txt and hasattr(result, 'candidates'):
                     cand = result.candidates
@@ -248,6 +240,7 @@ intents.message_content = True
 intents.reactions = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+_user_last_call = {}
 _user_persona = {}
 
 @bot.event
